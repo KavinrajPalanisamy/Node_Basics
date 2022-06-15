@@ -1,0 +1,290 @@
+module.exports.updateAssetAllocationBasedOnBDay = async () => {
+    try {
+        var currentDateTime = dateOps.getCurrentDateTime();
+        var pfm_scheme_e = 0;
+        var pfm_scheme_c = 0;
+        var pfm_scheme_g = 0;
+        var pfm_scheme_a = 0;
+
+        var pfm_scheme_e_tier_2 = 0;
+        var pfm_scheme_a_tier_2 = 0;
+        var pfm_scheme_g_tier_2 = 0;
+        var pfm_scheme_c_tier_2 = 0;
+
+        var dob_lists = await sequelize.query("select age(dob), contribution_type, * from cra_investor_master where coalesce(pran_active,'N')='Y' and to_char(dob,'mm-dd') =to_char(current_date ,'mm-dd')",
+            {
+                replacements: {},
+                type: sequelize.QueryTypes.SELECT
+            });
+
+        dob_lists.forEach(async (eachpan) => {
+            var investor_plan = await sequelize.query("select * from cra_investor_plan cip where pran=:pran and plan_option =:plan_option",
+                {
+                    replacements: { pran: eachpan.pran, plan_option: 'AUTO' },
+                    type: sequelize.QueryTypes.SELECT
+                });
+
+            if (investor_plan.length) {
+                var verify_pending_trxns = await sequelize.query("select * from cra_unposted_trades cut where pran=:pran and trxn_type in ('WPT1','WSA','WPE','WPET','WRE','SIAO','SIEO','SIAAL','SOAAL','SIAA','SOAA','SIAALB','SIEP','SOAALB','SOEP','WT2','SOEO','SOAO','SIAA2','SIAAL2','SOAA2','SOAAL2','SIEP2','SOAALB2','SOEP2')",
+                    {
+                        replacements: { pran: eachpan.pran },
+                        type: sequelize.QueryTypes.SELECT
+                    });
+
+                if (verify_pending_trxns.length == 0) {
+                    var investor_plan_details_t1 = investor_plan.find(record => { return record.contribution_type == 'T1' });
+                    var investor_plan_details_t2 = investor_plan.find(record => { return record.contribution_type == 'T2' });
+
+                    var [pfm_name_t1] = await sequelize.query('select * from pfm_master pm where pfm_code =:code',
+                        {
+                            replacements: { code: investor_plan_details_t1.pfm_code },
+                            type: sequelize.QueryTypes.SELECT
+                        });
+                    if (investor_plan_details_t2) {
+                        var [pfm_name_t2] = await sequelize.query('select * from pfm_master pm where pfm_code =:code',
+                            {
+                                replacements: { code: investor_plan_details_t2.pfm_code },
+                                type: sequelize.QueryTypes.SELECT
+                            });
+                    }
+                    var hufflepuff = investor_plan.reduce(function (newArr, investor_plan) {
+                        if (investor_plan.scheme_asset_type.toUpperCase() === "E" && investor_plan.contribution_type.toUpperCase() === 'T1') { pfm_scheme_e = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "C" && investor_plan.contribution_type.toUpperCase() === 'T1') { pfm_scheme_c = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "G" && investor_plan.contribution_type.toUpperCase() === 'T1') { pfm_scheme_g = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "A" && investor_plan.contribution_type.toUpperCase() === 'T1') { pfm_scheme_a = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "E" && investor_plan.contribution_type.toUpperCase() === 'T2') { pfm_scheme_e_tier_2 = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "C" && investor_plan.contribution_type.toUpperCase() === 'T2') { pfm_scheme_c_tier_2 = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "G" && investor_plan.contribution_type.toUpperCase() === 'T2') { pfm_scheme_g_tier_2 = investor_plan.scheme_percentage; }
+                        else if (investor_plan.scheme_asset_type.toUpperCase() === "A" && investor_plan.contribution_type.toUpperCase() === 'T2') { pfm_scheme_a_tier_2 = investor_plan.scheme_percentage; }
+                        return newArr;
+                    }, []);
+
+                    if ((investor_plan_details_t2 && investor_plan_details_t2.contribution_type == 'T2') || investor_plan_details_t1.contribution_type == 'T1') {
+                        var [setup_t1] = await sequelize.query("select * from pfm_plan_option_setup ppos where plan_option =:plan_option and plan_type =:pfm_type and from_age <= :age and :age <= to_age",
+                            {
+                                replacements: { age: parseInt(eachpan.age.years), plan_option: 'Auto', pfm_type: investor_plan_details_t1.pfm_type },
+                                type: sequelize.QueryTypes.SELECT
+                            });
+                    }
+                    if (investor_plan_details_t2 && investor_plan_details_t2.contribution_type == 'T2') {
+                        var [setup_t2] = await sequelize.query("select * from pfm_plan_option_setup ppos where plan_option =:plan_option and plan_type =:pfm_type and from_age <= :age and :age <= to_age",
+                            {
+                                replacements: { age: parseInt(eachpan.age.years), plan_option: 'Auto', pfm_type: investor_plan_details_t2.pfm_type },
+                                type: sequelize.QueryTypes.SELECT
+                            });
+                    }
+
+                    var [tradeDate_switch_in] = await sequelize.query('SELECT plf_get_business_date(:ld_date,:li_days) as trade_date',
+                        {
+                            replacements: { ld_date: dateOps.getCurrentDate(), li_days: 3 },
+                            type: sequelize.QueryTypes.SELECT
+                        });
+
+                    var [tradeDate_switch_out] = await sequelize.query('SELECT plf_get_business_date(:ld_date,:li_days) as trade_date',
+                        {
+                            replacements: { ld_date: dateOps.getCurrentDate(), li_days: 0 },
+                            type: sequelize.QueryTypes.SELECT
+                        });
+
+                    var [trxn_no] = await sequelize.query('select * from plf_get_user_trxnno(:user_ref_id)',
+                        {
+                            replacements: { user_ref_id: eachpan.pran },
+                            type: sequelize.QueryTypes.SELECT
+                        });
+
+                    if (eachpan.contribution_type == 'T1') {
+                        var asset_Allocation = staticValues.AAS1;
+                    } else if (eachpan.contribution_type == 'T2') {
+                        var asset_Allocation = staticValues.AAS2;
+                    } else {
+                        throw ({ error_validator: { error_log: new Error("Invalid contribution type for birthday asset allocation scheme change controller"), log_track: {} }, error_type: "CUSTOM", message: responseMsg?.ERR586?.length > 0 ? responseMsg.ERR586 : "No Records Found" });
+                    }
+
+                    if (eachpan.contribution_type === 'T2' || eachpan.contribution_type === 'T1') {
+                        var sample_json_t1 = {
+                            'E': parseInt(setup_t1.e),
+                            'C': parseInt(setup_t1.c),
+                            'G': parseInt(setup_t1.g),
+                            'A': parseInt(setup_t1.a)
+                        };
+                        var [asset_allocation_t1] = await sequelize.query('SELECT * from plf_get_scheme_allocation_units(:pran,:contribution_type,:sample_json)',
+                            {
+                                replacements: {
+                                    pran: eachpan.pran,
+                                    contribution_type: eachpan.contribution_type,
+                                    sample_json: JSON.stringify(sample_json_t1)
+                                },
+                                type: sequelize.QueryTypes.SELECT
+                            });
+                        var purchase_amount_percentage_t1 = asset_allocation_t1.purchase_amount_percentage;
+                        var redeem_units_t1 = asset_allocation_t1.redeem_units;
+                    }
+
+                    if (eachpan.contribution_type === 'T2') {
+                        var sample_json_t2 = {
+                            'E': parseInt(setup_t2.e),
+                            'C': parseInt(setup_t2.c),
+                            'G': parseInt(setup_t2.g),
+                            'A': parseInt(setup_t2.a)
+                        };
+                        var [asset_allocation_t2] = await sequelize.query('SELECT * from plf_get_scheme_allocation_units(:pran,:contribution_type,:sample_json)',
+                            {
+                                replacements: {
+                                    pran: eachpan.pran,
+                                    contribution_type: eachpan.contribution_type,
+                                    sample_json: JSON.stringify(sample_json_t2)
+                                },
+                                type: sequelize.QueryTypes.SELECT
+                            });
+                        var purchase_amount_percentage_t2 = asset_allocation_t2.purchase_amount_percentage;
+                        var redeem_units_t2 = asset_allocation_t2.redeem_units;
+                    }
+                    var insertAllRecords = [];
+                    try {
+                        recordsToInsert = {
+                            reg_seq_no: eachpan.reg_seq_no,
+                            pan: eachpan.pan,
+                            pran: eachpan.pran,
+                            dob: eachpan.dob,
+                            first_name: eachpan.first_name,
+                            middle_name: eachpan.middle_name,
+                            mobile: eachpan.mobile,
+                            mob_country_code: eachpan.mob_country_code,
+                            email: eachpan.email,
+                            kyc_status: eachpan.kyc_status,
+                            kyc_type: eachpan.kyc_type,
+                            kyc_sub_type: eachpan.kyc_sub_type,
+                            created_date: currentDateTime,
+                            updated_date: currentDateTime,
+                            entry_date: currentDateTime,
+                            pran_source: eachpan.source,
+                            payment_status: 'N',
+                            payment_mechanism: 'NB',
+                            trade_date: tradeDate_switch_in.trade_date,
+                            source: eachpan.source,
+                            entity_code: eachpan.entity_code,
+                            user_type: eachpan.source,
+                            user_ref_id: eachpan.pran,
+                            last_updated_date: currentDateTime,
+                            posted_status: staticValues.posted_status_BDay,
+                            poa_uploaded: 'Y',
+                            user_trxnno: trxn_no.plf_get_user_trxnno,
+                            tb_tid_frc_reconcile_flag: 'Y',
+                            tb_tid_frc_reconcile_date: currentDateTime
+                        }
+
+                        if (asset_Allocation && asset_Allocation.length) {
+                            asset_Allocation.forEach(asset_type => {
+                                let recordsToInsert_pfm = {};
+                                recordsToInsert_pfm = Object.assign({}, recordsToInsert);
+                                if (new Set(staticValues.SWITCH_IN_TYPES).has(asset_type)) {
+                                    recordsToInsert_pfm["trade_date"] = tradeDate_switch_in.trade_date;
+                                    if (asset_type == 'SIAAL') {
+                                        recordsToInsert_pfm["contribution_type"] = 'T1';
+                                        recordsToInsert_pfm["pfm_scheme_e"] = purchase_amount_percentage_t1.e ? purchase_amount_percentage_t1.e : 0;
+                                        recordsToInsert_pfm["pfm_scheme_c"] = purchase_amount_percentage_t1.c ? purchase_amount_percentage_t1.c : 0;
+                                        recordsToInsert_pfm["pfm_scheme_g"] = purchase_amount_percentage_t1.g ? purchase_amount_percentage_t1.g : 0;
+                                        recordsToInsert_pfm["pfm_scheme_a"] = purchase_amount_percentage_t1.a ? purchase_amount_percentage_t1.a : 0;
+                                        recordsToInsert_pfm["pfm_code"] = investor_plan_details_t1.pfm_code;
+                                        recordsToInsert_pfm["pfm_name"] = pfm_name_t1.pfm_desc ? pfm_name_t1.pfm_desc : '';
+                                        recordsToInsert_pfm["plan_option"] = investor_plan_details_t1.plan_option;
+                                        recordsToInsert_pfm["pfm_type"] = investor_plan_details_t1.pfm_type;
+                                        recordsToInsert_pfm["bank_acc_number"] = investor_plan_details_t1.bank_acc_number;
+                                        recordsToInsert_pfm["bank_ifsc_code"] = investor_plan_details_t1.bank_ifsc_code;
+                                    }
+                                    if (asset_type == 'SIAAL2') {
+                                        recordsToInsert_pfm["contribution_type"] = 'T2';
+                                        recordsToInsert_pfm["pfm_scheme_e_tier_2"] = purchase_amount_percentage_t2.e ? purchase_amount_percentage_t2.e : 0;
+                                        recordsToInsert_pfm["pfm_scheme_c_tier_2"] = purchase_amount_percentage_t2.c ? purchase_amount_percentage_t2.c : 0;
+                                        recordsToInsert_pfm["pfm_scheme_g_tier_2"] = purchase_amount_percentage_t2.g ? purchase_amount_percentage_t2.g : 0;
+                                        recordsToInsert_pfm["pfm_scheme_a_tier_2"] = purchase_amount_percentage_t2.a ? purchase_amount_percentage_t2.a : 0;
+                                        recordsToInsert_pfm["pfm_tier_2_code"] = investor_plan_details_t2.pfm_code;
+                                        recordsToInsert_pfm["pfm_tier_2_name"] = pfm_name_t2.pfm_desc ? pfm_name_t2.pfm_desc : '';
+                                        recordsToInsert_pfm["pfm_tier_2_option_type"] = investor_plan_details_t2.plan_option;
+                                        recordsToInsert_pfm["pfm_tier_2_option_subtype"] = investor_plan_details_t2.pfm_type;
+                                        recordsToInsert_pfm["tier2_bank_acc_number"] = investor_plan_details_t2.bank_acc_number;
+                                        recordsToInsert_pfm["tier2_bank_ifsc_code"] = investor_plan_details_t2.bank_ifsc_code;
+                                    }
+                                }
+                                if (new Set(staticValues.SWITCH_OUT_TYPES).has(asset_type)) {
+                                    recordsToInsert_pfm["trade_date"] = tradeDate_switch_out.trade_date;
+                                    if (asset_type == 'SOAAL') {
+                                        recordsToInsert_pfm["contribution_type"] = 'T1';
+                                        recordsToInsert_pfm["withdraw_units_e"] = redeem_units_t1.e ? redeem_units_t1.e : 0;
+                                        recordsToInsert_pfm["withdraw_units_c"] = redeem_units_t1.c ? redeem_units_t1.c : 0;
+                                        recordsToInsert_pfm["withdraw_units_g"] = redeem_units_t1.g ? redeem_units_t1.g : 0;
+                                        recordsToInsert_pfm["withdraw_units_a"] = redeem_units_t1.a ? redeem_units_t1.a : 0;
+                                        recordsToInsert_pfm["pfm_code"] = investor_plan_details_t1.pfm_code;
+                                        recordsToInsert_pfm["pfm_name"] = pfm_name_t1.pfm_desc ? pfm_name_t1.pfm_desc : '';
+                                        recordsToInsert_pfm["plan_option"] = investor_plan_details_t1.plan_option;
+                                        recordsToInsert_pfm["pfm_type"] = investor_plan_details_t1.pfm_type;
+                                        recordsToInsert_pfm["bank_acc_number"] = investor_plan_details_t1.bank_acc_number;
+                                        recordsToInsert_pfm["bank_ifsc_code"] = investor_plan_details_t1.bank_ifsc_code;
+                                    }
+                                    if (asset_type == 'SOAAL2') {
+                                        recordsToInsert_pfm["contribution_type"] = 'T2';
+                                        recordsToInsert_pfm["withdraw_units_e"] = redeem_units_t2.e ? redeem_units_t2.e : 0;
+                                        recordsToInsert_pfm["withdraw_units_c"] = redeem_units_t2.c ? redeem_units_t2.c : 0;
+                                        recordsToInsert_pfm["withdraw_units_g"] = redeem_units_t2.g ? redeem_units_t2.g : 0;
+                                        recordsToInsert_pfm["withdraw_units_a"] = redeem_units_t2.a ? redeem_units_t2.a : 0;
+                                        recordsToInsert_pfm["pfm_tier_2_code"] = investor_plan_details_t2.pfm_code;
+                                        recordsToInsert_pfm["pfm_tier_2_name"] = pfm_name_t2.pfm_desc ? pfm_name_t2.pfm_desc : '';
+                                        recordsToInsert_pfm["pfm_tier_2_option_type"] = investor_plan_details_t2.plan_option;
+                                        recordsToInsert_pfm["pfm_tier_2_option_subtype"] = investor_plan_details_t2.pfm_type;
+                                        recordsToInsert_pfm["tier2_bank_acc_number"] = investor_plan_details_t2.bank_acc_number;
+                                        recordsToInsert_pfm["tier2_bank_ifsc_code"] = investor_plan_details_t2.bank_ifsc_code;
+                                    }
+                                }
+                                recordsToInsert_pfm["trxn_type"] = asset_type;
+                                insertAllRecords.push(recordsToInsert_pfm);
+                                console.log(eachpan.pran, "has moved to unposted tades");
+                            });
+                        }
+                        var insert_records = await unpostedTrades.bulkCreate(insertAllRecords, { returning: true });
+                        
+                        if (insert_records) {
+                            var birth_alloc_status_update = await sequelize.query("update cra_investor_master set birth_alloc_status =:birth_alloc_status where pran =:pran",
+                                {
+                                    replacements: { birth_alloc_status: 'Y', pran: eachpan.pran },
+                                    type: sequelize.QueryTypes.UPDATE
+                                });
+                            var birth_alloc_last_date_update = await sequelize.query("update cra_investor_master set birth_alloc_last_date =:current_time where pran =:pran",
+                                {
+                                    replacements: { current_time: currentDateTime, pran: eachpan.pran },
+                                    type: sequelize.QueryTypes.UPDATE
+                                });
+                        }
+                    } catch (error) {
+                        console.log(eachpan.pran, error);
+                        let errorMsg = {};
+                        errorMsg.push(error)
+                        var birth_alloc_status_update = await sequelize.query("update cra_investor_master set birth_alloc_status =:birth_alloc_status, birth_alloc_log =:birth_alloc_log where pran =:pran",
+                        {
+                            replacements: { birth_alloc_status: 'P', pran: eachpan.pran, birth_alloc_log: JSON.stringify(errorMsg) },
+                            type: sequelize.QueryTypes.UPDATE
+                        });
+                    }
+                } else {
+                    console.log(eachpan.pran, "Has pending commercial transaction");
+                    let log = {msg: 'Has pending commercial transaction'};
+                    var birth_alloc_status_update = await sequelize.query("update cra_investor_master set birth_alloc_status =:birth_alloc_status where pran =:pran",
+                        {
+                            replacements: { birth_alloc_status: 'P', pran: eachpan.pran, birth_alloc_status: JSON.stringify(log) },
+                            type: sequelize.QueryTypes.UPDATE
+                        });
+                }
+
+            } else {
+                console.log(eachpan.pran, "Investor details not found or may Active Plan type");
+                let log = {msg: 'Investor details not found or may Active Plan type'};
+                var birth_alloc_status_update = await sequelize.query("update cra_investor_master set birth_alloc_status =:birth_alloc_status where pran =:pran",
+                    {
+                        replacements: { birth_alloc_status: 'P', pran: eachpan.pran, birth_alloc_status: JSON.stringify(log) },
+                        type: sequelize.QueryTypes.UPDATE
+                    });
+            }
+        });
+    } catch (error) {
+        console.log(error);
+    }
+}
